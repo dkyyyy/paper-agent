@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/dkyyyy/paper-agent/gateway/internal/grpc/agentpb";
+
+// AgentService defines the gRPC contract between the Go gateway and Python agent service.
+service AgentService {
+  // Chat accepts one user message and streams back token/status events.
+  rpc Chat(ChatRequest) returns (stream ChatEvent);
+
+  // UploadPaper accepts raw file content and returns parsing metadata.
+  rpc UploadPaper(UploadPaperRequest) returns (UploadPaperResponse);
+
+  // HealthCheck reports service readiness and dependent service status.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ChatRequest {
+  string session_id = 1;
+  string content = 2;
+  repeated string attachment_ids = 3;
+  SessionContext context = 4;
+}
+
+message SessionContext {
+  repeated ChatMessage history = 1;
+  ResearchContext research = 2;
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message ResearchContext {
+  string topic = 1;
+  repeated string analyzed_paper_ids = 2;
+  string current_step = 3;
+}
+
+message ChatEvent {
+  EventType event_type = 1;
+  string content = 2;
+  string agent_name = 3;
+  string step_description = 4;
+  string error_message = 5;
+}
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_TOKEN = 1;
+  EVENT_TYPE_AGENT_STATUS = 2;
+  EVENT_TYPE_DONE = 3;
+  EVENT_TYPE_ERROR = 4;
+}
+
+message UploadPaperRequest {
+  string session_id = 1;
+  string filename = 2;
+  bytes file_content = 3;
+}
+
+message UploadPaperResponse {
+  string paper_id = 1;
+  string title = 2;
+  int32 page_count = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  map<string, string> services = 2;
+}
