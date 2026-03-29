@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/dkyyyy/paper-agent/gateway/internal/config"
+	"github.com/dkyyyy/paper-agent/gateway/internal/handler"
 	"github.com/dkyyyy/paper-agent/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -38,7 +39,6 @@ func main() {
 	defer rdb.Close()
 
 	sessionSvc := service.NewSessionService(rdb)
-	_ = sessionSvc
 
 	agentClient, err := service.NewAgentClient(cfg.GRPC.AgentAddr, cfg.GRPC.Timeout)
 	if err != nil {
@@ -52,6 +52,13 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	chatHandler := handler.NewChatHandler(sessionSvc, agentClient)
+
+	api := r.Group("/api/v1")
+	{
+		api.POST("/chat", chatHandler.ChatSSE)
+	}
+	r.GET("/ws", chatHandler.ChatWS)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
