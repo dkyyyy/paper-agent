@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/dkyyyy/paper-agent/gateway/internal/config"
 	"github.com/dkyyyy/paper-agent/gateway/internal/handler"
+	"github.com/dkyyyy/paper-agent/gateway/internal/middleware"
 	"github.com/dkyyyy/paper-agent/gateway/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -51,20 +53,30 @@ func main() {
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(middleware.CORS())
+	r.Use(middleware.Logging())
 
+	limiter := middleware.NewRateLimiter(60, time.Minute)
+	r.Use(limiter.Middleware())
+
+	healthHandler := handler.NewHealthHandler(rdb, agentClient)
 	chatHandler := handler.NewChatHandler(sessionSvc, agentClient)
+	sessionHandler := handler.NewSessionHandler(sessionSvc)
 	fileSvc := service.NewFileService(cfg.Upload.Dir, cfg.Upload.MaxSize)
 	uploadHandler := handler.NewUploadHandler(fileSvc, agentClient, cfg.GRPC.MaxRetry)
+
+	r.GET("/health", healthHandler.Health)
+	r.GET("/ws", chatHandler.ChatWS)
 
 	api := r.Group("/api/v1")
 	{
 		api.POST("/chat", chatHandler.ChatSSE)
 		api.POST("/upload", uploadHandler.Upload)
+		api.POST("/sessions", sessionHandler.Create)
+		api.GET("/sessions", sessionHandler.List)
+		api.GET("/sessions/:id/messages", sessionHandler.GetMessages)
+		api.DELETE("/sessions/:id", sessionHandler.Delete)
 	}
-	r.GET("/ws", chatHandler.ChatWS)
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("starting gateway", "addr", addr)
