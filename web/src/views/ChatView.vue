@@ -1,24 +1,20 @@
 ﻿<script setup lang="ts">
+import ChatPanel from '../components/ChatPanel/ChatPanel.vue'
 </script>
 
 <template>
   <div class="chat-view">
     <div class="sidebar">
-      <!-- Sidebar placeholder -->
       <div class="sidebar-header">
         <h2>Paper Agent</h2>
       </div>
+      <div class="sidebar-content">
+        <!-- SessionList 组件在任务 7.6 中实现 -->
+        <p class="placeholder">会话列表开发中</p>
+      </div>
     </div>
     <div class="main">
-      <div class="messages">
-        <!-- Messages placeholder -->
-        <p style="color: #909399; text-align: center; margin-top: 40vh;">
-          开始你的学术研究之旅
-        </p>
-      </div>
-      <div class="input-bar">
-        <!-- Input placeholder -->
-      </div>
+      <ChatPanel />
     </div>
   </div>
 </template>
@@ -33,6 +29,8 @@
   width: 280px;
   border-right: 1px solid #e4e7ed;
   background: #fff;
+  display: flex;
+  flex-direction: column;
 
   .sidebar-header {
     padding: 16px;
@@ -43,24 +41,23 @@
       color: #303133;
     }
   }
+
+  .sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .placeholder {
+    padding: 20px;
+    color: #c0c4cc;
+    text-align: center;
+    font-size: 13px;
+  }
 }
 
 .main {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #f0f2f5;
-}
-
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-}
-
-.input-bar {
-  padding: 16px 20px;
-  background: #fff;
-  border-top: 1px solid #e4e7ed;
 }
 </style>
