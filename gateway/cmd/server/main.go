@@ -40,6 +40,14 @@ func main() {
 	sessionSvc := service.NewSessionService(rdb)
 	_ = sessionSvc
 
+	agentClient, err := service.NewAgentClient(cfg.GRPC.AgentAddr, cfg.GRPC.Timeout)
+	if err != nil {
+		slog.Error("failed to create agent client", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("agent grpc client created", "addr", cfg.GRPC.AgentAddr)
+	defer agentClient.Close()
+
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
 	r.Use(gin.Recovery())
