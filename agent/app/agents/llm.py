@@ -25,4 +25,14 @@ def get_llm() -> BaseChatModel:
             model=config.llm_model,
             api_key=config.llm_api_key,
         )
+    if config.llm_provider == "openai":
+        from langchain_openai import ChatOpenAI
+        import os
+
+        return ChatOpenAI(
+            model=config.llm_model,
+            api_key=config.llm_api_key,
+            base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+            streaming=True,
+        )
     raise ValueError(f"Unsupported LLM provider: {config.llm_provider}")

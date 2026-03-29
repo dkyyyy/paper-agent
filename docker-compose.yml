@@ -45,6 +45,7 @@ services:
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-qwen-plus}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v3}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
       REDIS_URL: redis://redis:6379/0
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
