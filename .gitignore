@@ -1,0 +1,34 @@
+# Dependencies
+gateway/vendor/
+web/node_modules/
+web/dist/
+agent/__pycache__/
+agent/**/__pycache__/
+agent/.venv/
+
+# Environment
+.env
+*.env.local
+
+# Uploads
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+gateway/gateway
+gateway/server
+
+# Docker volumes
+postgres_data/
+chroma_data/
+
+# Test
+.pytest_cache/
