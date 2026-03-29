@@ -1,7 +1,7 @@
 ﻿<script setup lang="ts">
+import { ref, watch, nextTick, onMounted } from 'vue'
 import { ChatDotRound, Cpu } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { ref, watch, nextTick, onMounted } from 'vue'
 import { uploadPDF } from '../../api/upload'
 import { useStreaming } from '../../composables/useStreaming'
 import { useChatStore } from '../../stores/chat'
@@ -17,13 +17,22 @@ const suggestions = [
 ]
 
 const chatStore = useChatStore()
-const { connect, send, isConnected } = useStreaming()
+const { connect, disconnect, send, isConnected } = useStreaming()
 const messagesContainer = ref<HTMLElement>()
 const inputBarRef = ref<InstanceType<typeof InputBar>>()
 
 onMounted(() => {
   connect()
 })
+
+watch(
+  () => chatStore.currentSessionId,
+  (sessionId, previousSessionId) => {
+    if (sessionId === previousSessionId) return
+    disconnect()
+    connect(sessionId || undefined)
+  },
+)
 
 // Auto-scroll to bottom
 watch(

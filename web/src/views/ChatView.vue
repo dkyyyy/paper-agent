@@ -1,17 +1,22 @@
 ﻿<script setup lang="ts">
 import ChatPanel from '../components/ChatPanel/ChatPanel.vue'
+import SessionList from '../components/Sidebar/SessionList.vue'
+
+function handleSwitchSession(_sessionId: string) {
+  // Reconnect WebSocket with new session
+  // ChatPanel handles this internally via useStreaming
+}
 </script>
 
 <template>
   <div class="chat-view">
     <div class="sidebar">
       <div class="sidebar-header">
-        <h2>Paper Agent</h2>
+        <h2>📄 Paper Agent</h2>
       </div>
-      <div class="sidebar-content">
-        <!-- SessionList 组件在任务 7.6 中实现 -->
-        <p class="placeholder">会话列表开发中</p>
-      </div>
+      <SessionList
+        @switch-session="handleSwitchSession"
+      />
     </div>
     <div class="main">
       <ChatPanel />
