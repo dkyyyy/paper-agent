@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/dkyyyy/paper-agent/gateway/internal/config"
+	"github.com/dkyyyy/paper-agent/gateway/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -21,6 +24,21 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.LogSummary()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		slog.Error("failed to connect redis", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("redis connected", "addr", cfg.Redis.Addr)
+	defer rdb.Close()
+
+	sessionSvc := service.NewSessionService(rdb)
+	_ = sessionSvc
 
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
