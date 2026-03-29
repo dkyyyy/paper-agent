@@ -53,10 +53,13 @@ func main() {
 	r.Use(gin.Recovery())
 
 	chatHandler := handler.NewChatHandler(sessionSvc, agentClient)
+	fileSvc := service.NewFileService(cfg.Upload.Dir, cfg.Upload.MaxSize)
+	uploadHandler := handler.NewUploadHandler(fileSvc, agentClient, cfg.GRPC.MaxRetry)
 
 	api := r.Group("/api/v1")
 	{
 		api.POST("/chat", chatHandler.ChatSSE)
+		api.POST("/upload", uploadHandler.Upload)
 	}
 	r.GET("/ws", chatHandler.ChatWS)
 	r.GET("/health", func(c *gin.Context) {
