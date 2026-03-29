@@ -1,0 +1,28 @@
+server:
+  port: 8080
+  mode: debug
+
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+
+grpc:
+  agent_addr: localhost:50051
+  timeout: 120s
+  max_retry: 3
+
+postgres:
+  host: localhost
+  port: 5432
+  user: paper_agent
+  password: paper_agent
+  dbname: paper_agent
+  sslmode: disable
+
+upload:
+  max_size: 20971520
+  dir: ./uploads
+
+log:
+  level: info
