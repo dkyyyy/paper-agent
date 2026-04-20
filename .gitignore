@@ -32,3 +32,6 @@ chroma_data/
 
 # Test
 .pytest_cache/
+
+# Worktrees
+.worktrees/
