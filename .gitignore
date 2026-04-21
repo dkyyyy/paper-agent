@@ -12,6 +12,7 @@ agent/.venv/
 
 # Uploads
 uploads/
+docs/
 
 # IDE
 .idea/
