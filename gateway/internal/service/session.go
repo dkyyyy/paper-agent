@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -13,10 +14,10 @@ import (
 
 const (
 	sessionKeyPrefix = "session:"
-	sessionTTL       = 1 * time.Hour
+	sessionTTL       = time.Hour
 )
 
-// SessionService manages chat session storage in Redis.
+// SessionService manages persistent chat sessions backed by PostgreSQL.
 type SessionService interface {
 	Create(ctx context.Context) (*model.Session, error)
 	Get(ctx context.Context, sessionID string) (*model.Session, error)
@@ -26,133 +27,280 @@ type SessionService interface {
 }
 
 type sessionService struct {
+	db  *sql.DB
 	rdb *redis.Client
 }
 
-// NewSessionService creates a Redis-backed session service.
-func NewSessionService(rdb *redis.Client) SessionService {
-	return &sessionService{rdb: rdb}
+// NewSessionService creates a PostgreSQL-backed session service with Redis hot-cache support.
+func NewSessionService(db *sql.DB, rdb *redis.Client) SessionService {
+	return &sessionService{
+		db:  db,
+		rdb: rdb,
+	}
 }
 
-func sessionKey(id string) string {
+func sessionCacheKey(id string) string {
 	return sessionKeyPrefix + id
 }
 
 func (s *sessionService) Create(ctx context.Context) (*model.Session, error) {
-	now := time.Now()
 	sess := &model.Session{
-		ID:        uuid.New().String(),
-		CreatedAt: now,
-		UpdatedAt: now,
-		Messages:  []model.Message{},
+		ID:       uuid.New().String(),
+		Messages: []model.Message{},
 	}
 
-	data, err := json.Marshal(sess)
-	if err != nil {
-		return nil, fmt.Errorf("marshal session: %w", err)
+	if err := s.db.QueryRowContext(
+		ctx,
+		"INSERT INTO sessions (id, created_at, updated_at) VALUES ($1, NOW(), NOW()) RETURNING created_at, updated_at",
+		sess.ID,
+	).Scan(&sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("insert session: %w", err)
 	}
 
-	if err := s.rdb.Set(ctx, sessionKey(sess.ID), data, sessionTTL).Err(); err != nil {
-		return nil, fmt.Errorf("redis set: %w", err)
-	}
-
+	s.cacheSession(ctx, sess)
 	return sess, nil
 }
 
 func (s *sessionService) Get(ctx context.Context, sessionID string) (*model.Session, error) {
-	data, err := s.rdb.Get(ctx, sessionKey(sessionID)).Bytes()
-	if err == redis.Nil {
-		return nil, fmt.Errorf("session not found: %s", sessionID)
+	if cached, ok := s.loadCachedSession(ctx, sessionID); ok {
+		return cached, nil
 	}
+
+	sess, err := s.loadSessionFromDB(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("redis get: %w", err)
+		return nil, err
 	}
 
-	var sess model.Session
-	if err := json.Unmarshal(data, &sess); err != nil {
-		return nil, fmt.Errorf("unmarshal session: %w", err)
-	}
-
-	return &sess, nil
+	s.cacheSession(ctx, sess)
+	return sess, nil
 }
 
-func (s *sessionService) AppendMessage(ctx context.Context, sessionID string, msg model.Message) error {
-	sess, err := s.Get(ctx, sessionID)
-	if err != nil {
-		return err
+func (s *sessionService) AppendMessage(ctx context.Context, sessionID string, msg model.Message) (err error) {
+	if msg.Role == "" {
+		return fmt.Errorf("message role is required")
+	}
+	if msg.Content == "" {
+		return fmt.Errorf("message content is required")
 	}
 
-	now := time.Now()
-	msg.Timestamp = now
-	sess.Messages = append(sess.Messages, msg)
-	sess.MessageCount = len(sess.Messages)
-	sess.UpdatedAt = now
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
+	}
 
-	if sess.Title == "" && msg.Role == "user" {
-		title := msg.Content
-		if len(title) > 50 {
-			title = title[:50] + "..."
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
 		}
-		sess.Title = title
+	}()
+
+	title := sessionTitleFromMessage(msg)
+	if _, err = tx.ExecContext(
+		ctx,
+		`
+		INSERT INTO sessions (id, title, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			title = COALESCE(sessions.title, EXCLUDED.title),
+			updated_at = NOW()
+		`,
+		sessionID,
+		title,
+	); err != nil {
+		return fmt.Errorf("upsert session: %w", err)
 	}
 
-	data, err := json.Marshal(sess)
-	if err != nil {
-		return fmt.Errorf("marshal session: %w", err)
+	metadataJSON := []byte("{}")
+	if msg.Metadata != nil {
+		metadataJSON, err = json.Marshal(msg.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
 	}
 
-	if err := s.rdb.Set(ctx, sessionKey(sessionID), data, sessionTTL).Err(); err != nil {
-		return fmt.Errorf("redis set: %w", err)
+	if _, err = tx.ExecContext(
+		ctx,
+		"INSERT INTO messages (session_id, role, content, metadata, created_at) VALUES ($1, $2, $3, $4, NOW())",
+		sessionID,
+		msg.Role,
+		msg.Content,
+		metadataJSON,
+	); err != nil {
+		return fmt.Errorf("insert message: %w", err)
 	}
 
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+
+	s.invalidateCache(ctx, sessionID)
 	return nil
 }
 
 func (s *sessionService) Delete(ctx context.Context, sessionID string) error {
-	result, err := s.rdb.Del(ctx, sessionKey(sessionID)).Result()
+	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = $1", sessionID)
 	if err != nil {
-		return fmt.Errorf("redis del: %w", err)
+		return fmt.Errorf("delete session: %w", err)
 	}
-	if result == 0 {
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete session rows affected: %w", err)
+	}
+	if rows == 0 {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
+
+	s.invalidateCache(ctx, sessionID)
 	return nil
 }
 
 func (s *sessionService) List(ctx context.Context) ([]*model.SessionSummary, error) {
-	keys, err := s.rdb.Keys(ctx, sessionKeyPrefix+"*").Result()
+	rows, err := s.db.QueryContext(
+		ctx,
+		`
+		SELECT
+			s.id,
+			COALESCE(s.title, ''),
+			s.created_at,
+			COALESCE(latest.content, ''),
+			COALESCE(message_counts.message_count, 0)
+		FROM sessions AS s
+		LEFT JOIN (
+			SELECT session_id, COUNT(*)::BIGINT AS message_count
+			FROM messages
+			GROUP BY session_id
+		) AS message_counts
+			ON message_counts.session_id = s.id
+		LEFT JOIN LATERAL (
+			SELECT content
+			FROM messages
+			WHERE session_id = s.id
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		) AS latest ON TRUE
+		ORDER BY s.updated_at DESC, s.created_at DESC
+		`,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("redis keys: %w", err)
+		return nil, fmt.Errorf("list sessions: %w", err)
 	}
+	defer rows.Close()
 
-	summaries := make([]*model.SessionSummary, 0, len(keys))
-	for _, key := range keys {
-		data, err := s.rdb.Get(ctx, key).Bytes()
-		if err != nil {
-			continue
+	summaries := make([]*model.SessionSummary, 0)
+	for rows.Next() {
+		var summary model.SessionSummary
+		var messageCount int64
+		if err := rows.Scan(
+			&summary.ID,
+			&summary.Title,
+			&summary.CreatedAt,
+			&summary.LastMessage,
+			&messageCount,
+		); err != nil {
+			return nil, fmt.Errorf("scan session summary: %w", err)
 		}
-
-		var sess model.Session
-		if err := json.Unmarshal(data, &sess); err != nil {
-			continue
-		}
-
-		summary := &model.SessionSummary{
-			ID:           sess.ID,
-			Title:        sess.Title,
-			CreatedAt:    sess.CreatedAt,
-			MessageCount: len(sess.Messages),
-		}
-		if len(sess.Messages) > 0 {
-			last := sess.Messages[len(sess.Messages)-1]
-			summary.LastMessage = last.Content
-			if len(summary.LastMessage) > 100 {
-				summary.LastMessage = summary.LastMessage[:100] + "..."
-			}
-		}
-
-		summaries = append(summaries, summary)
+		summary.MessageCount = int(messageCount)
+		summaries = append(summaries, &summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session summaries: %w", err)
 	}
 
 	return summaries, nil
+}
+
+func (s *sessionService) loadSessionFromDB(ctx context.Context, sessionID string) (*model.Session, error) {
+	sess := &model.Session{}
+	if err := s.db.QueryRowContext(
+		ctx,
+		"SELECT id, COALESCE(title, ''), created_at, updated_at FROM sessions WHERE id = $1",
+		sessionID,
+	).Scan(&sess.ID, &sess.Title, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("session not found: %s", sessionID)
+		}
+		return nil, fmt.Errorf("query session: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		"SELECT role, content, COALESCE(metadata, '{}'::jsonb), created_at FROM messages WHERE session_id = $1 ORDER BY created_at ASC, id ASC",
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query messages: %w", err)
+	}
+	defer rows.Close()
+
+	sess.Messages = make([]model.Message, 0)
+	for rows.Next() {
+		var msg model.Message
+		var rawMetadata []byte
+		if err := rows.Scan(&msg.Role, &msg.Content, &rawMetadata, &msg.Timestamp); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		if len(rawMetadata) > 0 && string(rawMetadata) != "null" {
+			if err := json.Unmarshal(rawMetadata, &msg.Metadata); err != nil {
+				return nil, fmt.Errorf("unmarshal message metadata: %w", err)
+			}
+		}
+		sess.Messages = append(sess.Messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate messages: %w", err)
+	}
+
+	sess.MessageCount = len(sess.Messages)
+	return sess, nil
+}
+
+func (s *sessionService) loadCachedSession(ctx context.Context, sessionID string) (*model.Session, bool) {
+	if s.rdb == nil {
+		return nil, false
+	}
+
+	data, err := s.rdb.Get(ctx, sessionCacheKey(sessionID)).Bytes()
+	if err == redis.Nil || err != nil {
+		return nil, false
+	}
+
+	var sess model.Session
+	if err := json.Unmarshal(data, &sess); err != nil {
+		return nil, false
+	}
+	return &sess, true
+}
+
+func (s *sessionService) cacheSession(ctx context.Context, sess *model.Session) {
+	if s.rdb == nil || sess == nil {
+		return
+	}
+
+	data, err := json.Marshal(sess)
+	if err != nil {
+		return
+	}
+	_ = s.rdb.Set(ctx, sessionCacheKey(sess.ID), data, sessionTTL).Err()
+}
+
+func (s *sessionService) invalidateCache(ctx context.Context, sessionID string) {
+	if s.rdb == nil {
+		return
+	}
+	_ = s.rdb.Del(ctx, sessionCacheKey(sessionID)).Err()
+}
+
+func sessionTitleFromMessage(msg model.Message) string {
+	if msg.Role != "user" {
+		return ""
+	}
+	title := msg.Content
+	if len(title) > 50 {
+		return title[:50] + "..."
+	}
+	return title
 }

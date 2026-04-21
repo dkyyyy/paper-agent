@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 class SearchCache:
     """Cache search results in Redis with TTL."""
 
-    def __init__(self, ttl: int = 3600, client: redis.Redis | None = None):
-        self.ttl = ttl
+    def __init__(self, ttl: int | None = None, client: redis.Redis | None = None):
+        self.ttl = ttl if ttl is not None else config.search_cache_ttl_seconds
         self._client = client
 
     @property

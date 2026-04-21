@@ -9,7 +9,7 @@ redis:
 
 grpc:
   agent_addr: localhost:50051
-  timeout: 120s
+  timeout: 600s
   max_retry: 3
 
 postgres:

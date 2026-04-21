@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { UploadFilled, Promotion } from '@element-plus/icons-vue'
+import { Document, UploadFilled, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
 
@@ -64,7 +64,8 @@ defineExpose({ addAttachment })
         type="info"
         @close="removeAttachment(index)"
       >
-        📄 {{ file.name }}
+        <el-icon><Document /></el-icon>
+        {{ file.name }}
       </el-tag>
     </div>
     <div class="input-row">

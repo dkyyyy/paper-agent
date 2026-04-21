@@ -1,8 +1,4 @@
-"""
-Agent: Analysis Agent
-职责: 论文深度分析、五元组提取、分层分块、向量化入库
-绑定工具: pdf_parser, chunk_indexer
-"""
+"""Analysis agent for paper parsing, extraction, and optional vector indexing."""
 
 import json
 import logging
@@ -11,6 +7,7 @@ from typing import Any, TypedDict
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 
+from app.agents.llm import invoke_llm
 from app.prompts.analysis import EXTRACT_INFO_PROMPT, PAPER_SUMMARY_PROMPT
 from app.rag.chunker import Chunk, chunk_paragraph, chunk_section
 from app.rag.indexer import compute_file_hash, index_chunks, is_paper_indexed
@@ -28,6 +25,8 @@ class AnalysisState(TypedDict):
     summary: str
     indexed: bool
     skipped: bool
+    persist_to_vectordb: bool
+    index_error: str
     events: list[dict[str, str]]
 
 
@@ -59,16 +58,16 @@ def _extract_json_payload(text: str) -> str:
 
 
 def check_duplicate(state: AnalysisState) -> dict[str, Any]:
-    """Check whether the paper was already indexed via MD5 hash."""
+    """Check whether the paper was already indexed via content hash."""
     events = list(state.get("events", []))
     file_hash = compute_file_hash(state["paper_content"])
 
-    if is_paper_indexed(state["paper_id"], file_hash):
+    if state["persist_to_vectordb"] and is_paper_indexed(state["paper_id"], file_hash):
         events.append(
             {
                 "type": "agent_status",
                 "agent": "analysis_agent",
-                "step": f"论文已存在，跳过重复分析：{state['paper_id']}",
+                "step": f"Paper already indexed; skipping duplicate analysis: {state['paper_id']}",
             }
         )
         return {"file_hash": file_hash, "skipped": True, "events": events}
@@ -77,7 +76,7 @@ def check_duplicate(state: AnalysisState) -> dict[str, Any]:
         {
             "type": "agent_status",
             "agent": "analysis_agent",
-            "step": f"开始分析论文：{state.get('paper_title') or state['paper_id']}",
+            "step": f"Starting analysis: {state.get('paper_title') or state['paper_id']}",
         }
     )
     return {"file_hash": file_hash, "skipped": False, "events": events}
@@ -97,7 +96,7 @@ def chunk_paper(state: AnalysisState) -> dict[str, Any]:
         {
             "type": "agent_status",
             "agent": "analysis_agent",
-            "step": f"分块完成：{len(paragraph_chunks)} 段落 + {len(section_chunks)} 章节",
+            "step": f"Chunked paper into {len(paragraph_chunks)} paragraph chunks and {len(section_chunks)} section chunks.",
         }
     )
     return {
@@ -117,64 +116,76 @@ def chunk_paper(state: AnalysisState) -> dict[str, Any]:
 
 
 def extract_info(state: AnalysisState) -> dict[str, Any]:
-    """Extract five-tuple metadata and generate a paper summary via LLM."""
+    """Extract structured metadata and generate a paper summary."""
     if state.get("skipped"):
         return {}
 
-    from app.agents.llm import get_llm
-
     events = list(state.get("events", []))
-    llm = get_llm()
     truncated_content = state["paper_content"][:12000]
 
     events.append(
         {
             "type": "agent_status",
             "agent": "analysis_agent",
-            "step": "正在提取论文关键信息（五元组）...",
+            "step": "Extracting structured paper metadata.",
         }
     )
     extraction_prompt = EXTRACT_INFO_PROMPT.format(content=truncated_content)
-    extraction_response = llm.invoke([HumanMessage(content=extraction_prompt)])
+    extraction_response = invoke_llm(
+        [HumanMessage(content=extraction_prompt)],
+        source="analysis.extract_info",
+    )
 
     try:
         extracted_info = json.loads(_extract_json_payload(_response_to_text(extraction_response)))
     except json.JSONDecodeError:
         extracted_info = {
-            "research_question": "提取失败",
-            "method": "提取失败",
+            "research_question": "Extraction failed",
+            "method": "Extraction failed",
             "dataset": [],
             "metrics": {},
-            "results": "提取失败",
+            "results": "Extraction failed",
         }
 
     events.append(
         {
             "type": "agent_status",
             "agent": "analysis_agent",
-            "step": "正在生成论文摘要...",
+            "step": "Generating paper summary.",
         }
     )
     summary_prompt = PAPER_SUMMARY_PROMPT.format(
         title=state.get("paper_title", ""),
         content=truncated_content,
     )
-    summary_response = llm.invoke([HumanMessage(content=summary_prompt)])
-    summary = _response_to_text(summary_response)
+    summary_response = invoke_llm(
+        [HumanMessage(content=summary_prompt)],
+        source="analysis.summary",
+    )
 
     return {
         "extracted_info": extracted_info,
-        "summary": summary,
+        "summary": _response_to_text(summary_response),
         "events": events,
     }
 
 
 def index_to_vectordb(state: AnalysisState) -> dict[str, Any]:
-    """Index chunked paper content into Chroma."""
+    """Index chunked paper content into Chroma when enabled."""
     if state.get("skipped"):
-        return {"indexed": False}
+        return {"indexed": True, "index_error": ""}
 
     events = list(state.get("events", []))
+    if not state["persist_to_vectordb"]:
+        events.append(
+            {
+                "type": "agent_status",
+                "agent": "analysis_agent",
+                "step": "Skipping vector indexing because this analysis is based on abstract-only content.",
+            }
+        )
+        return {"indexed": False, "index_error": "", "events": events}
+
     chunks: list[Chunk] = []
     for item in state.get("chunks", []):
         chunks.append(
@@ -206,24 +217,24 @@ def index_to_vectordb(state: AnalysisState) -> dict[str, Any]:
             {
                 "type": "agent_status",
                 "agent": "analysis_agent",
-                "step": f"向量化入库完成：{indexed_count} 个 chunks",
+                "step": f"Indexed {indexed_count} chunks into Chroma.",
             }
         )
-        return {"indexed": True, "events": events}
+        return {"indexed": True, "index_error": "", "events": events}
     except Exception as exc:
-        logger.error("Index failed: %s", exc)
+        logger.error("Index failed: %s", exc, exc_info=True)
         events.append(
             {
                 "type": "agent_status",
                 "agent": "analysis_agent",
-                "step": f"向量化入库失败：{exc}",
+                "step": f"Vector indexing failed: {exc}",
             }
         )
-        return {"indexed": False, "events": events}
+        return {"indexed": False, "index_error": str(exc), "events": events}
 
 
 def build_analysis_graph():
-    """Build the Analysis Agent LangGraph state machine."""
+    """Build the analysis agent LangGraph state machine."""
     graph = StateGraph(AnalysisState)
     graph.add_node("check_duplicate", check_duplicate)
     graph.add_node("chunk_paper", chunk_paper)
@@ -241,7 +252,12 @@ def build_analysis_graph():
 analysis_graph = build_analysis_graph()
 
 
-def run_analysis(paper_id: str, paper_title: str, paper_content: str) -> dict[str, Any]:
+def run_analysis(
+    paper_id: str,
+    paper_title: str,
+    paper_content: str,
+    persist_to_vectordb: bool = True,
+) -> dict[str, Any]:
     """Run the analysis agent on a single paper."""
     initial_state = AnalysisState(
         paper_id=paper_id,
@@ -253,6 +269,8 @@ def run_analysis(paper_id: str, paper_title: str, paper_content: str) -> dict[st
         summary="",
         indexed=False,
         skipped=False,
+        persist_to_vectordb=persist_to_vectordb,
+        index_error="",
         events=[],
     )
     return analysis_graph.invoke(initial_state)

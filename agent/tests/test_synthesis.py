@@ -1,4 +1,4 @@
-"""Tests for the Synthesis Agent."""
+"""Tests for the synthesis agent."""
 
 from types import SimpleNamespace
 
@@ -92,20 +92,20 @@ def test_run_synthesis_full(monkeypatch):
     stub_llm = StubLLM(
         [
             "| Paper | Method |\n| --- | --- |\n| RAG-Fusion | RRF |",
-            "[1] RAG-Fusion improved retrieval quality.\n\nReferences\n[1] Author A et al. \"RAG-Fusion\". 2024.",
-            "## 研究时间线\n### 2023\n- **Self-RAG** - Introduced reflection tokens.",
-            "1. 已覆盖方向\n2. 潜在 Gap\n- 多模态 RAG",
+            "RAG-Fusion improved retrieval quality and Self-RAG added self-reflection.",
+            "2023: Self-RAG.\n2024: RAG-Fusion.",
+            "1. Multi-modal grounding remains open.\n2. Evaluation breadth is limited.",
         ]
     )
     monkeypatch.setattr(llm_module, "get_llm", lambda: stub_llm)
 
     result = run_synthesis(sample_papers(), "RAG optimization", task_type="full")
 
-    assert "## 方法对比" in result["output"]
-    assert "## 文献综述" in result["output"]
-    assert "## 研究时间线" in result["output"]
-    assert "## Research Gap 分析" in result["output"]
-    assert any("报告生成完成" in event["step"] for event in result["events"])
+    assert "## Method Comparison" in result["output"]
+    assert "## Literature Review" in result["output"]
+    assert "## Research Timeline" in result["output"]
+    assert "## Research Gaps" in result["output"]
+    assert any("Report assembly completed" in event["step"] for event in result["events"])
 
 
 def test_task_type_controls_generation(monkeypatch):
@@ -122,5 +122,5 @@ def test_task_type_controls_generation(monkeypatch):
     assert result["survey_text"] == ""
     assert result["timeline"] == ""
     assert result["gap_analysis"] == ""
-    assert "## 方法对比" in result["output"]
-    assert "## 文献综述" not in result["output"]
+    assert "## Method Comparison" in result["output"]
+    assert "## Literature Review" not in result["output"]

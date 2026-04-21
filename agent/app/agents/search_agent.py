@@ -1,15 +1,8 @@
-"""
-Agent: Search Agent
-职责: 多源文献检索、自适应查询扩展、结果去重排序
-绑定工具: arxiv_search, semantic_scholar_search
-"""
+"""Search agent for multi-source literature retrieval and ranking."""
 
 import hashlib
 import json
 import logging
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any, Literal, TypedDict
@@ -17,7 +10,10 @@ from typing import Any, Literal, TypedDict
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 
+from app.agents.llm import invoke_llm
+from app.mcp_servers.client import call_mcp_tool
 from app.prompts.search import KEYWORD_EXTRACTION_PROMPT, QUERY_EXPANSION_PROMPT
+from app.services.cache import search_cache
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +39,8 @@ class SearchState(TypedDict):
     iteration: int
     max_iterations: int
     target_count: int
+    year_from: int
+    feedback: str
     events: list[dict[str, str]]
 
 
@@ -73,31 +71,86 @@ def _extract_json_payload(text: str) -> str:
     return text.strip()
 
 
-def plan_search(state: SearchState) -> dict[str, Any]:
-    """提取关键词或扩展查询。"""
-    from app.agents.llm import get_llm
+def _extract_method_names(query: str) -> list[str]:
+    """从查询中提取明确的方法/模型名称（如 RAG-Fusion、Self-RAG、CRAG）。"""
+    import re
+    # 匹配：含连字符的术语、全大写缩写、驼峰命名
+    pattern = r'\b([A-Z][a-zA-Z]*(?:[-][A-Za-z]+)+|[A-Z]{2,}(?:-[A-Za-z]+)*)\b'
+    candidates = re.findall(pattern, query)
+    # 过滤太短或太泛的通用词
+    skip = {"RAG", "LLM", "NLP", "AI", "ML", "API", "GPU", "CPU"}
+    results = [c for c in candidates if c not in skip and len(c) >= 3]
+    # 对每个方法名追加 "method" 以避免搜到同名基准/数据集
+    return [f"{name} method" if len(name) <= 6 else name for name in results]
 
+
+def plan_search(state: SearchState) -> dict[str, Any]:
+    """Generate initial keywords or expand the query adaptively."""
     events = list(state.get("events", []))
-    llm = get_llm()
+    feedback = state.get("feedback", "")
 
     if state["iteration"] == 0:
-        prompt = KEYWORD_EXTRACTION_PROMPT.format(query=state["query"])
-        response = llm.invoke([HumanMessage(content=prompt)])
+        # 有 feedback 说明是 quality_check 触发的重试，用 feedback 重新规划查询
+        if feedback:
+            prompt = (
+                f"上一轮搜索结果被质量审核拒绝，原因如下：\n{feedback}\n\n"
+                f"原始用户查询：{state['query']}\n\n"
+                "请根据质量反馈，生成 2-3 个更精确的搜索查询词，重点修正上述问题。\n"
+                "输出 JSON 格式：\n```json\n{\"keywords\": [\"query1\", \"query2\"]}\n```"
+            )
+            response = invoke_llm(
+                [HumanMessage(content=prompt)],
+                source="search.feedback_replanning",
+            )
+            try:
+                data = json.loads(_extract_json_payload(_response_to_text(response)))
+                keywords = data.get("keywords") or [state["query"]]
+            except json.JSONDecodeError:
+                keywords = [state["query"]]
+            events.append(
+                {
+                    "type": "agent_status",
+                    "agent": "search_agent",
+                    "step": f"Replanning search based on feedback: {', '.join(keywords)}",
+                }
+            )
+        else:
+            # 优先检测查询中是否包含明确的方法名
+            method_names = _extract_method_names(state["query"])
 
-        try:
-            data = json.loads(_extract_json_payload(_response_to_text(response)))
-            keywords = data.get("keywords") or [state["query"]]
-        except json.JSONDecodeError:
-            keywords = [state["query"]]
+            if method_names:
+                # 直接用方法名作为独立查询，跳过 LLM 关键词提取
+                keywords = method_names
+                events.append(
+                    {
+                        "type": "agent_status",
+                        "agent": "search_agent",
+                        "step": f"Detected method names, searching directly: {', '.join(keywords)}",
+                    }
+                )
+            else:
+                # 通用查询走 LLM 关键词提取
+                prompt = KEYWORD_EXTRACTION_PROMPT.format(query=state["query"])
+                response = invoke_llm(
+                    [HumanMessage(content=prompt)],
+                    source="search.keyword_extraction",
+                )
 
-        search_queries = [" ".join(keywords)]
-        events.append(
-            {
-                "type": "agent_status",
-                "agent": "search_agent",
-                "step": f"关键词提取完成：{', '.join(keywords)}",
-            }
-        )
+                try:
+                    data = json.loads(_extract_json_payload(_response_to_text(response)))
+                    keywords = data.get("keywords") or [state["query"]]
+                except json.JSONDecodeError:
+                    keywords = [state["query"]]
+
+                events.append(
+                    {
+                        "type": "agent_status",
+                        "agent": "search_agent",
+                        "step": f"Extracted keywords: {', '.join(keywords)}",
+                    }
+                )
+
+        search_queries = keywords  # 每个关键词单独一路查询，不拼接
         return {
             "keywords": keywords,
             "search_queries": state["search_queries"] + search_queries,
@@ -110,7 +163,10 @@ def plan_search(state: SearchState) -> dict[str, Any]:
         current_count=len(state["papers"]),
         target_count=state["target_count"],
     )
-    response = llm.invoke([HumanMessage(content=prompt)])
+    response = invoke_llm(
+        [HumanMessage(content=prompt)],
+        source="search.query_expansion",
+    )
 
     try:
         data = json.loads(_extract_json_payload(_response_to_text(response)))
@@ -127,7 +183,11 @@ def plan_search(state: SearchState) -> dict[str, Any]:
         {
             "type": "agent_status",
             "agent": "search_agent",
-            "step": f"扩展搜索：{', '.join(deduped_queries) if deduped_queries else '无新增查询'}",
+            "step": (
+                f"Expanded search with: {', '.join(deduped_queries)}"
+                if deduped_queries
+                else "No new search queries were generated."
+            ),
         }
     )
     return {
@@ -137,36 +197,37 @@ def plan_search(state: SearchState) -> dict[str, Any]:
 
 
 def execute_search(state: SearchState) -> dict[str, Any]:
-    """执行多源搜索。"""
+    """Execute multi-source search for pending queries."""
+    import time
+
     events = list(state.get("events", []))
     raw_results = list(state.get("raw_results", []))
     executed_queries = {result.get("_query", "") for result in raw_results}
     pending_queries = [query for query in state["search_queries"] if query not in executed_queries]
 
+    year_from = state.get("year_from", 0)
+    s2_last_request_time = 0.0
+
     for query in pending_queries:
-        events.append(
-            {
-                "type": "agent_status",
-                "agent": "search_agent",
-                "step": f"正在检索 ArXiv：{query}",
-            }
-        )
-        arxiv_results = _search_arxiv(query, max_results=20)
+        # Semantic Scholar 作主数据源（有引用数、相关性好）
+        # 限速：确保距上次 S2 请求至少间隔 1.1s
+        elapsed = time.time() - s2_last_request_time
+        if elapsed < 1.1:
+            time.sleep(1.1 - elapsed)
+
+        events.append({"type": "agent_status", "agent": "search_agent", "step": f"Searching Semantic Scholar: {query}"})
+        s2_results = _search_semantic_scholar(query, max_results=10, year_from=year_from)
+        s2_last_request_time = time.time()
+        for result in s2_results:
+            result["_query"] = query
+        raw_results.extend(s2_results)
+
+        # ArXiv 作补充（覆盖预印本，不限速）
+        events.append({"type": "agent_status", "agent": "search_agent", "step": f"Searching ArXiv: {query}"})
+        arxiv_results = _search_arxiv(query, max_results=10, year_from=year_from)
         for result in arxiv_results:
             result["_query"] = query
         raw_results.extend(arxiv_results)
-
-        events.append(
-            {
-                "type": "agent_status",
-                "agent": "search_agent",
-                "step": f"正在检索 Semantic Scholar：{query}",
-            }
-        )
-        semantic_results = _search_semantic_scholar(query, max_results=20)
-        for result in semantic_results:
-            result["_query"] = query
-        raw_results.extend(semantic_results)
 
     return {
         "raw_results": raw_results,
@@ -174,91 +235,60 @@ def execute_search(state: SearchState) -> dict[str, Any]:
     }
 
 
-def _search_arxiv(query: str, max_results: int = 20) -> list[dict[str, Any]]:
-    """Search the ArXiv API directly. Will be replaced by MCP in task 4.1."""
+def _search_arxiv(query: str, max_results: int = 20, year_from: int = 0) -> list[dict[str, Any]]:
+    """Search ArXiv through the MCP client."""
+    cache_params = {"query": query, "max_results": max_results, "year_from": year_from}
+    cached = search_cache.get("arxiv_search", cache_params)
+    if cached is not None:
+        return cached
+
     try:
-        encoded_query = urllib.parse.quote(query)
-        url = (
-            "http://export.arxiv.org/api/query?"
-            f"search_query=all:{encoded_query}&start=0&max_results={max_results}&sortBy=relevance"
+        results = call_mcp_tool(
+            "app.mcp_servers.arxiv_server",
+            "arxiv_search",
+            {
+                "query": query,
+                "max_results": max_results,
+                "year_from": year_from,
+            },
         )
-        request = urllib.request.Request(url, headers={"User-Agent": "PaperAgent/1.0"})
-
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = response.read().decode("utf-8")
-
-        root = ET.fromstring(payload)
-        namespace = {"atom": "http://www.w3.org/2005/Atom"}
-        results: list[dict[str, Any]] = []
-
-        for entry in root.findall("atom:entry", namespace):
-            title = entry.find("atom:title", namespace)
-            summary = entry.find("atom:summary", namespace)
-            published = entry.find("atom:published", namespace)
-            paper_url = entry.find("atom:id", namespace)
-            authors = [
-                author.find("atom:name", namespace).text
-                for author in entry.findall("atom:author", namespace)
-                if author.find("atom:name", namespace) is not None
-            ]
-
-            results.append(
-                {
-                    "paper_id": f"arxiv:{paper_url.text.split('/')[-1]}" if paper_url is not None else "",
-                    "title": title.text.strip().replace("\n", " ") if title is not None else "",
-                    "authors": authors,
-                    "abstract": summary.text.strip().replace("\n", " ") if summary is not None else "",
-                    "year": int(published.text[:4]) if published is not None else 0,
-                    "source": "arxiv",
-                    "url": paper_url.text if paper_url is not None else "",
-                    "citation_count": 0,
-                }
-            )
-
-        return results
     except Exception as exc:
-        logger.error("ArXiv search failed: %s", exc)
+        logger.error("ArXiv MCP search failed: %s", exc, exc_info=True)
         return []
 
+    search_cache.set("arxiv_search", cache_params, results)
+    logger.info("ArXiv MCP search returned %d results for query: %s", len(results), query[:100])
+    return results
 
-def _search_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, Any]]:
-    """Search the Semantic Scholar API directly. Will be replaced by MCP in task 4.2."""
+
+def _search_semantic_scholar(query: str, max_results: int = 20, year_from: int = 0) -> list[dict[str, Any]]:
+    """Search Semantic Scholar through the MCP client."""
+    cache_params = {"query": query, "max_results": max_results, "year_from": year_from}
+    cached = search_cache.get("semantic_scholar_search", cache_params)
+    if cached is not None:
+        return cached
+
     try:
-        encoded_query = urllib.parse.quote(query)
-        url = (
-            "https://api.semanticscholar.org/graph/v1/paper/search?"
-            f"query={encoded_query}&limit={max_results}&"
-            "fields=paperId,title,abstract,year,authors,citationCount,externalIds,url"
+        results = call_mcp_tool(
+            "app.mcp_servers.semantic_scholar",
+            "s2_search",
+            {
+                "query": query,
+                "max_results": max_results,
+                "year_from": year_from,
+            },
         )
-        request = urllib.request.Request(url, headers={"User-Agent": "PaperAgent/1.0"})
-
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-
-        results: list[dict[str, Any]] = []
-        for paper in payload.get("data", []):
-            results.append(
-                {
-                    "paper_id": f"s2:{paper.get('paperId', '')}",
-                    "title": paper.get("title", ""),
-                    "authors": [author.get("name", "") for author in paper.get("authors", [])],
-                    "abstract": paper.get("abstract") or "",
-                    "year": paper.get("year") or 0,
-                    "source": "semantic_scholar",
-                    "doi": (paper.get("externalIds") or {}).get("DOI", ""),
-                    "url": paper.get("url", ""),
-                    "citation_count": paper.get("citationCount") or 0,
-                }
-            )
-
-        return results
     except Exception as exc:
-        logger.error("Semantic Scholar search failed: %s", exc)
+        logger.error("Semantic Scholar MCP search failed: %s", exc, exc_info=True)
         return []
+
+    search_cache.set("semantic_scholar_search", cache_params, results)
+    logger.info("Semantic Scholar MCP search returned %d results for query: %s", len(results), query[:100])
+    return results
 
 
 def deduplicate_and_rank(state: SearchState) -> dict[str, Any]:
-    """对多源结果进行去重和排序。"""
+    """Deduplicate and rank search results across providers."""
     events = list(state.get("events", []))
     seen_dois: set[str] = set()
     seen_title_hashes: set[str] = set()
@@ -303,7 +333,7 @@ def deduplicate_and_rank(state: SearchState) -> dict[str, Any]:
         {
             "type": "agent_status",
             "agent": "search_agent",
-            "step": f"去重排序完成：{len(state['raw_results'])} -> {len(unique_papers)} 篇",
+            "step": f"Deduplicated and ranked results: {len(state['raw_results'])} -> {len(unique_papers)} papers.",
         }
     )
     return {
@@ -314,7 +344,7 @@ def deduplicate_and_rank(state: SearchState) -> dict[str, Any]:
 
 
 def should_continue(state: SearchState) -> Literal["continue", "done"]:
-    """判断是否需要继续搜索。"""
+    """Decide whether another search-expansion iteration is needed."""
     if state["iteration"] >= state["max_iterations"]:
         return "done"
     if len(state["papers"]) >= state["target_count"]:
@@ -323,7 +353,7 @@ def should_continue(state: SearchState) -> Literal["continue", "done"]:
 
 
 def build_search_graph():
-    """构建 Search Agent 的 LangGraph 状态机。"""
+    """Build the search agent LangGraph state machine."""
     graph = StateGraph(SearchState)
     graph.add_node("plan_search", plan_search)
     graph.add_node("execute_search", execute_search)
@@ -346,8 +376,8 @@ def build_search_graph():
 search_graph = build_search_graph()
 
 
-def run_search(query: str, target_count: int = 15) -> dict[str, Any]:
-    """Run the search agent and return results."""
+def run_search(query: str, target_count: int = 15, year_from: int = 0, feedback: str = "", max_iterations: int = 3) -> dict[str, Any]:
+    """Run the search agent and return ranked literature results."""
     initial_state = SearchState(
         query=query,
         keywords=[],
@@ -355,8 +385,10 @@ def run_search(query: str, target_count: int = 15) -> dict[str, Any]:
         raw_results=[],
         papers=[],
         iteration=0,
-        max_iterations=3,
+        max_iterations=max_iterations,
         target_count=target_count,
+        year_from=year_from,
+        feedback=feedback,
         events=[],
     )
     return search_graph.invoke(initial_state)

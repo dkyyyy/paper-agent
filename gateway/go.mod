@@ -3,9 +3,11 @@ module github.com/dkyyyy/paper-agent/gateway
 go 1.25
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/spf13/viper v1.21.0
 	google.golang.org/grpc v1.79.3

@@ -1,6 +1,21 @@
 """Tests for token budget control."""
 
+from types import SimpleNamespace
+
+from langchain_core.messages import HumanMessage
+
+from app.agents import llm as llm_module
 from app.services.token_budget import TokenBudget, compress_messages
+
+
+class StubLLM:
+    def __init__(self, response, usage_metadata=None):
+        self._response = response
+        self._usage_metadata = usage_metadata or {}
+
+    def invoke(self, messages):
+        del messages
+        return SimpleNamespace(content=self._response, usage_metadata=self._usage_metadata)
 
 
 def test_budget_tracking():
@@ -66,3 +81,15 @@ def test_budget_to_dict():
     assert payload["budget"] == 50000
     assert payload["used"] == 1500
     assert payload["remaining"] == 48500
+
+
+def test_invoke_llm_records_token_usage(monkeypatch):
+    stub_llm = StubLLM("ok", usage_metadata={"input_tokens": 12, "output_tokens": 5})
+    budget = TokenBudget(budget=100)
+    monkeypatch.setattr(llm_module, "get_llm", lambda: stub_llm)
+
+    response = llm_module.invoke_llm([HumanMessage(content="hello")], source="unit.test", budget=budget)
+
+    assert response.content == "ok"
+    assert budget.used == 17
+    assert budget.history[-1]["source"] == "unit.test"

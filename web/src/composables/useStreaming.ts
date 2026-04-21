@@ -19,7 +19,7 @@ export function useStreaming() {
       chatStore.finalizeAssistantMessage(data.content)
     },
     onError(data: StreamErrorData) {
-      chatStore.finalizeAssistantMessage(`⚠️ 错误：${data.error}`)
+      chatStore.finalizeAssistantMessage(`错误：${data.error}`)
     },
     onSessionId(id: string) {
       chatStore.currentSessionId = id

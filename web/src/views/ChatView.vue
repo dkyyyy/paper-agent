@@ -1,4 +1,5 @@
 ﻿<script setup lang="ts">
+import { Document } from '@element-plus/icons-vue'
 import ChatPanel from '../components/ChatPanel/ChatPanel.vue'
 import SessionList from '../components/Sidebar/SessionList.vue'
 
@@ -12,7 +13,10 @@ function handleSwitchSession(_sessionId: string) {
   <div class="chat-view">
     <div class="sidebar">
       <div class="sidebar-header">
-        <h2>📄 Paper Agent</h2>
+        <div class="brand">
+          <el-icon class="brand-icon"><Document /></el-icon>
+          <h2>Paper Agent</h2>
+        </div>
       </div>
       <SessionList
         @switch-session="handleSwitchSession"
@@ -40,6 +44,17 @@ function handleSwitchSession(_sessionId: string) {
   .sidebar-header {
     padding: 16px;
     border-bottom: 1px solid #e4e7ed;
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-icon {
+      color: #409eff;
+      font-size: 18px;
+    }
 
     h2 {
       font-size: 18px;

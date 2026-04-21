@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/dkyyyy/paper-agent/gateway/internal/middleware"
 	"github.com/dkyyyy/paper-agent/gateway/internal/service"
 	"github.com/gin-gonic/gin"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,7 +42,19 @@ func main() {
 	slog.Info("redis connected", "addr", cfg.Redis.Addr)
 	defer rdb.Close()
 
-	sessionSvc := service.NewSessionService(rdb)
+	pgdb, err := sql.Open("pgx", cfg.Postgres.DSN())
+	if err != nil {
+		slog.Error("failed to open postgres", "error", err)
+		os.Exit(1)
+	}
+	if err := pgdb.PingContext(context.Background()); err != nil {
+		slog.Error("failed to connect postgres", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("postgres connected", "host", cfg.Postgres.Host, "port", cfg.Postgres.Port, "dbname", cfg.Postgres.DBName)
+	defer pgdb.Close()
+
+	sessionSvc := service.NewSessionService(pgdb, rdb)
 
 	agentClient, err := service.NewAgentClient(cfg.GRPC.AgentAddr, cfg.GRPC.Timeout)
 	if err != nil {

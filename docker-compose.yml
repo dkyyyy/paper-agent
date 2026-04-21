@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -11,7 +9,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U paper_agent"]
       interval: 5s
@@ -41,15 +39,39 @@ services:
       - "50051:50051"
     environment:
       GRPC_PORT: "50051"
-      LLM_PROVIDER: ${LLM_PROVIDER:-dashscope}
+      LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       LLM_API_KEY: ${LLM_API_KEY}
-      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v3}
-      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-local-hash-768}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      LOCAL_EMBEDDING_DIMENSIONS: ${LOCAL_EMBEDDING_DIMENSIONS:-768}
       REDIS_URL: redis://redis:6379/0
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: paper_agent
+      POSTGRES_PASSWORD: paper_agent
+      POSTGRES_DBNAME: paper_agent
+      POSTGRES_SSLMODE: disable
+      SEARCH_CACHE_TTL_SECONDS: ${SEARCH_CACHE_TTL_SECONDS:-3600}
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
+      UPLOAD_DIR: /app/uploads
+      MAX_ANALYSIS_PAPERS: ${MAX_ANALYSIS_PAPERS:-5}
+      SESSION_TOKEN_BUDGET: ${SESSION_TOKEN_BUDGET:-50000}
+      TOKEN_COMPRESS_THRESHOLD: ${TOKEN_COMPRESS_THRESHOLD:-0.8}
+      TOKEN_RESERVED_OUTPUT_TOKENS: ${TOKEN_RESERVED_OUTPUT_TOKENS:-2000}
+      TOKEN_KEEP_RECENT_TURNS: ${TOKEN_KEEP_RECENT_TURNS:-3}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+    volumes:
+      - agent_uploads:/app/uploads
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       chroma:
@@ -67,6 +89,7 @@ services:
       POSTGRES_USER: paper_agent
       POSTGRES_PASSWORD: paper_agent
       POSTGRES_DBNAME: paper_agent
+      POSTGRES_SSLMODE: disable
       GATEWAY_PORT: "8080"
     depends_on:
       redis:
@@ -86,3 +109,4 @@ services:
 volumes:
   postgres_data:
   chroma_data:
+  agent_uploads:
