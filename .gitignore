@@ -35,3 +35,5 @@ chroma_data/
 
 # Worktrees
 .worktrees/
+docs/superpowers/
+search_debug.json
